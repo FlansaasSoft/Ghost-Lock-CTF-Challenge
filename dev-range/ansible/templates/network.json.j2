@@ -1,0 +1,12 @@
+{
+  "deployment_id": {{ deployment_id | to_json }},
+  "role": {{ range_role | to_json }},
+  "underlay_ip": {{ underlay_ip | to_json }},
+  "router_ip": {{ router_underlay_ip | to_json }},
+  "nodes": {
+{% for role, definition in exercise_nodes.items() %}
+    {{ role | to_json }}: {{ dict(definition, underlay_ip=hostvars[role].underlay_ip) | to_json }}{{ ',' if not loop.last else '' }}
+{% endfor %}
+  }
+}
+

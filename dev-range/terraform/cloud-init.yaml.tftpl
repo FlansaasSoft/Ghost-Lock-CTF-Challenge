@@ -1,0 +1,23 @@
+#cloud-config
+# Bootstrapping installs only ordinary administration prerequisites. Sliver and
+# the exercise are configured later, after exact new resource IDs are verified.
+ssh_pwauth: false
+package_update: true
+packages:
+  - python3
+  - python3-venv
+  - ca-certificates
+  - openssh-server
+write_files:
+  - path: /etc/ghostlock-dev-range.json
+    owner: root:root
+    permissions: '0644'
+    content: |
+      {"deployment_id":"${deployment_id}","role":"${role}","managed_by":"ghostlock-dev-range"}
+  - path: /etc/ssh/sshd_config.d/30-ghostlock-key-only.conf
+    owner: root:root
+    permissions: '0644'
+    content: |
+      PasswordAuthentication no
+      PermitRootLogin prohibit-password
+

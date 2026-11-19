@@ -1,0 +1,11 @@
+.runtime/
+.tools/
+__pycache__/
+*.pyc
+terraform/.terraform/
+terraform/*.tfstate*
+terraform/*.tfplan
+terraform/terraform.tfvars
+ansible/inventory.json
+ansible/secrets.json
+

@@ -1,0 +1,450 @@
+---
+- name: Verify that every target belongs to this new deployment
+  hosts: all
+  gather_facts: false
+  vars_files: [secrets.json]
+  tasks:
+    - name: Wait for initial cloud configuration
+      ansible.builtin.command: cloud-init status --wait
+      register: cloud_init
+      changed_when: false
+      failed_when: cloud_init.rc not in [0, 2]
+      timeout: 900
+    - name: Read deployment marker before any configuration change
+      ansible.builtin.slurp:
+        src: /etc/ghostlock-dev-range.json
+      register: marker
+    - name: Reject a wrong deployment or role
+      ansible.builtin.assert:
+        that:
+          - (marker.content | b64decode | from_json).deployment_id == deployment_id
+          - (marker.content | b64decode | from_json).role == range_role
+          - inventory_hostname in ['analyst', 'victim', 'c2', 'goal', 'router']
+    - name: Install ordinary administration and capture prerequisites
+      ansible.builtin.apt:
+        name: [python3, python3-venv, iproute2, openssl, ca-certificates, openssh-server, tcpdump, curl, dnsutils, nftables, file, binutils, lsof]
+        update_cache: true
+        cache_valid_time: 3600
+        state: present
+      environment: {DEBIAN_FRONTEND: noninteractive}
+    - name: Install network configuration helper
+      ansible.builtin.copy:
+        src: files/range_network.py
+        dest: /usr/local/sbin/ghostlock-dev-network
+        mode: '0755'
+      register: network_helper
+    - name: Write this node's network definition
+      ansible.builtin.template:
+        src: network.json.j2
+        dest: /etc/ghostlock-dev-network.json
+        mode: '0600'
+      register: network_definition
+    - name: Install persistent network unit
+      ansible.builtin.template:
+        src: network.service.j2
+        dest: /etc/systemd/system/ghostlock-dev-network.service
+        mode: '0644'
+      register: network_unit
+
+- name: Configure the new router and its receive-only mirror
+  hosts: routers
+  gather_facts: false
+  tasks:
+    - name: Install virtual switch and simulated infrastructure services
+      ansible.builtin.apt:
+        name: [openvswitch-switch, dnsmasq, chrony]
+        state: present
+    - name: Start persistent exercise switching and routing
+      ansible.builtin.systemd_service:
+        name: ghostlock-dev-network
+        daemon_reload: true
+        enabled: true
+        state: "{{ 'restarted' if network_helper.changed or network_definition.changed or network_unit.changed else 'started' }}"
+    - name: Configure internal-only DNS
+      ansible.builtin.copy:
+        dest: /etc/dnsmasq.d/ghostlock-dev.conf
+        mode: '0644'
+        content: |
+          # No upstream forwarding: this is the simulated range's DNS service.
+          interface=br-mission
+          interface=br-adversary
+          bind-dynamic
+          no-resolv
+          domain-needed
+          bogus-priv
+          address=/mission-victim.mission.test/10.60.1.20
+          address=/mission-analyst.mission.test/10.60.1.10
+          address=/updates.ops-support.test/10.80.1.10
+          address=/mission-status.mission.test/10.60.1.1
+    - name: Start internal DNS
+      ansible.builtin.systemd_service:
+        name: dnsmasq
+        state: restarted
+        enabled: true
+    - name: Configure simulated local time service
+      ansible.builtin.copy:
+        dest: /etc/chrony/conf.d/ghostlock-dev.conf
+        mode: '0644'
+        content: |
+          allow 10.60.1.0/24
+          allow 10.80.1.0/24
+          local stratum 10
+    - name: Start time service
+      ansible.builtin.systemd_service:
+        name: chrony
+        state: restarted
+        enabled: true
+    - name: Install harmless simulated mission-status HTTP service
+      ansible.builtin.copy:
+        src: files/mission_status.py
+        dest: /usr/local/lib/ghostlock-mission-status.py
+        mode: '0644'
+    - name: Install status service unit
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/ghostlock-mission-status.service
+        mode: '0644'
+        content: |
+          [Unit]
+          Description=Ghost Lock synthetic mission status
+          After=ghostlock-dev-network.service
+          Requires=ghostlock-dev-network.service
+          [Service]
+          User=nobody
+          ExecStart=/usr/bin/python3 /usr/local/lib/ghostlock-mission-status.py
+          Restart=on-failure
+          NoNewPrivileges=yes
+          ProtectSystem=strict
+          ProtectHome=yes
+          PrivateTmp=yes
+          [Install]
+          WantedBy=multi-user.target
+    - name: Start synthetic status service
+      ansible.builtin.systemd_service:
+        name: ghostlock-mission-status
+        daemon_reload: true
+        enabled: true
+        state: started
+
+- name: Join the new challenge guests to their exercise LANs
+  hosts: all:!routers
+  gather_facts: false
+  tasks:
+    - name: Start persistent guest exercise interface
+      ansible.builtin.systemd_service:
+        name: ghostlock-dev-network
+        daemon_reload: true
+        enabled: true
+        state: "{{ 'restarted' if network_helper.changed or network_definition.changed or network_unit.changed else 'started' }}"
+    - name: Resolve the simulated C2 name without relying on public DNS
+      ansible.builtin.lineinfile:
+        path: /etc/hosts
+        regexp: '^10\.80\.1\.10\s'
+        line: '10.80.1.10 updates.ops-support.test'
+
+- name: Install the Kali analyst desktop and investigation tools
+  hosts: analysts
+  gather_facts: false
+  vars_files: [secrets.json]
+  tasks:
+    - name: Install a focused analyst workstation
+      ansible.builtin.apt:
+        # Keep a focused XFCE desktop without the Kali desktop metapackage's
+        # network-management stack. Cloud interfaces must remain cloud-managed.
+        name: [xfce4, xfce4-terminal, xrdp, xorgxrdp, dbus-x11, wireshark, tshark, nmap, binutils, file, strace, lsof, gdb, libcap2-bin]
+        state: present
+        install_recommends: false
+      environment: {DEBIAN_FRONTEND: noninteractive}
+      timeout: 1800
+    - name: Create the capture access group explicitly on minimal Kali images
+      ansible.builtin.group:
+        name: wireshark
+        system: true
+        state: present
+    - name: Create the staff-playtest analyst account
+      ansible.builtin.user:
+        name: analyst
+        shell: /bin/bash
+        create_home: true
+        groups: sudo,wireshark
+        append: true
+        password: "{{ analyst_password | password_hash('sha512', deployment_id) }}"
+      no_log: true
+    - name: Permit the analyst to capture live traffic without running the GUI as root
+      ansible.builtin.file:
+        path: /usr/bin/dumpcap
+        owner: root
+        group: wireshark
+        mode: '0750'
+    - name: Give dumpcap only the capture capabilities it needs
+      ansible.builtin.command: setcap cap_net_raw,cap_net_admin=eip /usr/bin/dumpcap
+      changed_when: false
+    - name: Permit lab administration from the analyst desktop
+      ansible.builtin.copy:
+        dest: /etc/sudoers.d/ghostlock-analyst
+        mode: '0440'
+        content: 'analyst ALL=(ALL) NOPASSWD: ALL'
+        validate: /usr/sbin/visudo -cf %s
+    - name: Select XFCE for the analyst session
+      ansible.builtin.copy:
+        dest: /home/analyst/.xsession
+        owner: analyst
+        group: analyst
+        mode: '0700'
+        content: "exec startxfce4\n"
+    - name: Create a private RDP TLS certificate
+      ansible.builtin.command:
+        argv: [openssl, req, -x509, -newkey, 'rsa:3072', -nodes, -sha256, -days, '90', -subj, '/CN=ghostlock-dev-analyst', -keyout, /etc/xrdp/ghostlock.key, -out, /etc/xrdp/ghostlock.crt]
+        creates: /etc/xrdp/ghostlock.crt
+      no_log: true
+    - name: Restrict RDP private-key access
+      ansible.builtin.file:
+        path: /etc/xrdp/ghostlock.key
+        owner: root
+        group: xrdp
+        mode: '0640'
+    - name: Install audited xrdp settings helper
+      ansible.builtin.copy:
+        src: files/configure_xrdp.py
+        dest: /usr/local/sbin/ghostlock-configure-xrdp
+        mode: '0755'
+    - name: Require TLS and disable the historical broken drive mount
+      ansible.builtin.command: /usr/local/sbin/ghostlock-configure-xrdp
+      register: xrdp_config
+      changed_when: "'changed' in xrdp_config.stdout"
+    - name: Start analyst desktop service
+      ansible.builtin.systemd_service:
+        name: xrdp
+        enabled: true
+        state: "{{ 'restarted' if xrdp_config.changed else 'started' }}"
+    - name: Read the RDP certificate fingerprint for gateway pinning
+      ansible.builtin.command: openssl x509 -in /etc/xrdp/ghostlock.crt -noout -fingerprint -sha256
+      register: rdp_fingerprint
+      changed_when: false
+    - name: Save gateway pin on the trusted new controller
+      ansible.builtin.copy:
+        dest: /root/ghostlock-dev/analyst-rdp-fingerprint.txt
+        mode: '0600'
+        content: "sha256:{{ rdp_fingerprint.stdout.split('=')[-1] | lower }}\n"
+      delegate_to: router
+
+- name: Configure victim and goal SSH accounts
+  hosts: victims:goals
+  gather_facts: false
+  vars_files: [secrets.json]
+  tasks:
+    - name: Create provided victim access or the protected goal account
+      ansible.builtin.user:
+        name: "{{ 'investigator' if range_role == 'victim' else 'mission' }}"
+        shell: /bin/bash
+        create_home: true
+        password: "{{ (victim_password if range_role == 'victim' else goal_password) | password_hash('sha512', deployment_id) }}"
+      no_log: true
+    - name: Allow investigation administration on the victim only
+      ansible.builtin.copy:
+        dest: /etc/sudoers.d/ghostlock-investigator
+        mode: '0440'
+        content: 'investigator ALL=(ALL) NOPASSWD: ALL'
+        validate: /usr/sbin/visudo -cf %s
+      when: range_role == 'victim'
+    - name: Permit exercise password logins only from exercise addresses
+      ansible.builtin.copy:
+        dest: /etc/ssh/sshd_config.d/10-ghostlock-exercise.conf
+        mode: '0644'
+        content: |
+          Match Address 10.60.1.0/24,10.80.1.0/24
+              PasswordAuthentication yes
+              PermitRootLogin no
+          Match all
+        validate: /usr/sbin/sshd -t -f %s
+    - name: Validate complete SSH configuration
+      ansible.builtin.command: /usr/sbin/sshd -t
+      changed_when: false
+    - name: Reload SSH without interrupting existing key-based administration
+      ansible.builtin.systemd_service:
+        name: ssh
+        state: reloaded
+    - name: Install synthetic mission context
+      ansible.builtin.copy:
+        dest: /etc/motd
+        mode: '0644'
+        content: |
+          Ghost Lock isolated staff prototype
+          Fictional mission-support environment. All systems and data are training fixtures.
+
+- name: Install the pinned Sliver server inside the adversary LAN
+  hosts: c2_servers
+  gather_facts: false
+  tasks:
+    - name: Create an unprivileged C2 service identity
+      ansible.builtin.user:
+        name: sliver
+        system: true
+        home: /var/lib/ghostlock-sliver
+        create_home: true
+        shell: /usr/sbin/nologin
+    - name: Create Sliver directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: sliver
+        group: sliver
+        mode: '0700'
+      loop: [/opt/sliver, /var/lib/ghostlock-sliver/state, /var/lib/ghostlock-sliver/artifacts]
+    - name: Download SHA256-pinned official Sliver release binaries
+      ansible.builtin.get_url:
+        url: "https://github.com/BishopFox/sliver/releases/download/v{{ sliver_version }}/{{ item.name }}_linux-amd64"
+        dest: "/opt/sliver/{{ item.name }}"
+        checksum: "sha256:{{ item.sha256 }}"
+        owner: sliver
+        group: sliver
+        mode: '0750'
+        timeout: 120
+      loop:
+        - {name: sliver-server, sha256: '{{ sliver_server_sha256 }}'}
+        - {name: sliver-client, sha256: '{{ sliver_client_sha256 }}'}
+      timeout: 900
+    - name: Install C2 service restricted to a loopback operator listener
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/ghostlock-sliver.service
+        mode: '0644'
+        content: |
+          [Unit]
+          Description=Ghost Lock range-only Sliver server
+          Requires=ghostlock-dev-network.service
+          After=ghostlock-dev-network.service network-online.target
+          [Service]
+          User=sliver
+          Group=sliver
+          Environment=HOME=/var/lib/ghostlock-sliver
+          Environment=SLIVER_ROOT_DIR=/var/lib/ghostlock-sliver/state
+          ExecStart=/opt/sliver/sliver-server daemon --lhost 127.0.0.1 --lport 31337
+          WorkingDirectory=/var/lib/ghostlock-sliver
+          Restart=on-failure
+          RestartSec=5
+          AmbientCapabilities=CAP_NET_BIND_SERVICE
+          CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+          NoNewPrivileges=yes
+          PrivateTmp=yes
+          ProtectSystem=strict
+          ReadWritePaths=/var/lib/ghostlock-sliver
+          LimitNOFILE=8192
+          [Install]
+          WantedBy=multi-user.target
+    - name: Start Sliver and its local-only operator endpoint
+      ansible.builtin.systemd_service:
+        name: ghostlock-sliver
+        enabled: true
+        daemon_reload: true
+        state: started
+    - name: Wait for embedded assets and local operator API
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: 31337
+        timeout: 600
+    - name: Install noninteractive prototype setup helper
+      ansible.builtin.copy:
+        src: files/sliver_setup.py
+        dest: /usr/local/sbin/ghostlock-sliver-setup
+        mode: '0755'
+    - name: Start a persistent range-only mTLS listener and build the readable implant
+      ansible.builtin.command: /usr/local/sbin/ghostlock-sliver-setup
+      register: sliver_setup
+      changed_when: "'created' in sliver_setup.stdout"
+      timeout: 1800
+    - name: Fetch the prototype implant to the trusted new controller
+      ansible.builtin.fetch:
+        src: /var/lib/ghostlock-sliver/artifacts/mission-agent
+        dest: /root/ghostlock-dev/artifacts/mission-agent
+        flat: true
+
+- name: Run the discoverable training implant on the victim
+  hosts: victims
+  gather_facts: false
+  tasks:
+    - name: Create an unprivileged mission helper account
+      ansible.builtin.user:
+        name: svc-mission
+        system: true
+        home: /var/lib/mission
+        create_home: true
+        shell: /usr/sbin/nologin
+    - name: Create a plausible, discoverable cache location
+      ansible.builtin.file:
+        path: /var/lib/mission/.cache/telemetry
+        state: directory
+        owner: svc-mission
+        group: svc-mission
+        mode: '0755'
+    - name: Install the implant through private authenticated administration
+      ansible.builtin.copy:
+        src: /root/ghostlock-dev/artifacts/mission-agent
+        dest: '{{ implant_path }}'
+        owner: root
+        group: root
+        mode: '0755'
+    - name: Install explicit and inspectable training service
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/mission-agent.service
+        mode: '0644'
+        content: |
+          # Authorized Ghost Lock prototype implant; intentionally easy to inspect.
+          [Unit]
+          Description=Mission telemetry helper
+          Requires=ghostlock-dev-network.service
+          After=ghostlock-dev-network.service network-online.target
+          [Service]
+          User=svc-mission
+          Group=svc-mission
+          ExecStart=/var/lib/mission/.cache/telemetry/mission-agent
+          WorkingDirectory=/var/lib/mission
+          Restart=on-failure
+          RestartSec=10
+          NoNewPrivileges=yes
+          [Install]
+          WantedBy=multi-user.target
+    - name: Start the training implant
+      ansible.builtin.systemd_service:
+        name: mission-agent
+        daemon_reload: true
+        enabled: true
+        state: started
+    - name: Add benign periodic DNS and HTTP traffic for comparison
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/ghostlock-mission-heartbeat.service
+        mode: '0644'
+        content: |
+          [Unit]
+          Description=Synthetic mission application heartbeat
+          After=ghostlock-dev-network.service
+          [Service]
+          Type=oneshot
+          User=svc-mission
+          ExecStart=/bin/sh -c 'dig +short @10.60.1.1 mission-status.mission.test >/dev/null; curl -fsS --max-time 3 http://10.60.1.1:8080/status >/dev/null'
+    - name: Install periodic benign traffic timer
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/ghostlock-mission-heartbeat.timer
+        mode: '0644'
+        content: |
+          [Unit]
+          Description=Periodic synthetic mission heartbeat
+          [Timer]
+          OnBootSec=15
+          OnUnitActiveSec=17
+          [Install]
+          WantedBy=timers.target
+    - name: Start benign traffic timer
+      ansible.builtin.systemd_service:
+        name: ghostlock-mission-heartbeat.timer
+        daemon_reload: true
+        enabled: true
+        state: started
+
+- name: Prepare the trusted controller's verification helpers
+  hosts: routers
+  gather_facts: false
+  tasks:
+    - name: Install isolated Python SSH verification dependency
+      ansible.builtin.command: /opt/ghostlock-ansible/bin/pip install --disable-pip-version-check paramiko==4.0.0
+      register: verifier_install
+      changed_when: "'Successfully installed' in verifier_install.stdout"
+

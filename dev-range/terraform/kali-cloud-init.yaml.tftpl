@@ -1,0 +1,31 @@
+#cloud-config
+# Desktop packages must not take ownership of provider-configured cloud NICs.
+# Mask NetworkManager before packages are installed; retain cloud-init's renderer.
+ssh_pwauth: false
+bootcmd:
+  - [systemctl, mask, NetworkManager.service, NetworkManager-wait-online.service]
+package_update: true
+packages:
+  - python3
+  - python3-venv
+  - ca-certificates
+  - openssh-server
+write_files:
+  - path: /etc/ghostlock-dev-range.json
+    owner: root:root
+    permissions: '0644'
+    content: |
+      {"deployment_id":"${deployment_id}","role":"${role}","managed_by":"ghostlock-dev-range"}
+  - path: /etc/NetworkManager/conf.d/99-ghostlock-cloud-unmanaged.conf
+    owner: root:root
+    permissions: '0644'
+    content: |
+      [keyfile]
+      unmanaged-devices=*
+  - path: /etc/ssh/sshd_config.d/30-ghostlock-key-only.conf
+    owner: root:root
+    permissions: '0644'
+    content: |
+      PasswordAuthentication no
+      PermitRootLogin prohibit-password
+

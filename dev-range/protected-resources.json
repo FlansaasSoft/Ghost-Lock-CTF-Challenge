@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "account_uuid": "4896a977-5877-45d3-83a2-b206063a32e1",
+  "description": "Read-only inventory taken before these scripts were created. These resources must never become managed resources in the dev-range Terraform state.",
+  "droplet": ["616707276", "616708783", "616709559", "616929500"],
+  "vpc": ["2f8b4017-6bb6-47e8-8fc5-8b3bb87f163c", "4bd74b12-9a20-4fdb-871e-4fc2191d1eeb"],
+  "firewall": ["0129d24d-ee43-46ed-b101-04be898ffad6", "7c44ee77-6965-4659-a21a-356722ec16a8", "f6037524-c37e-4435-8d56-dd588644c78c"],
+  "project": ["a915159b-9ca1-49e3-a571-32f2812dece8"],
+  "ssh_key": ["60679399"],
+  "image": ["253434968", "253435438", "253485598", "253486586", "253487521", "253507080"],
+  "tag": []
+}
+

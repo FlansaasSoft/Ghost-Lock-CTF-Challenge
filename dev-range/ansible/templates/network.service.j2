@@ -1,0 +1,15 @@
+[Unit]
+Description=Ghost Lock {{ range_role }} exercise networking
+After=network-online.target{% if range_role == 'router' %} openvswitch-switch.service{% endif %}
+
+Wants=network-online.target
+{% if range_role == 'router' %}Requires=openvswitch-switch.service
+{% endif %}
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /usr/local/sbin/ghostlock-dev-network
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+

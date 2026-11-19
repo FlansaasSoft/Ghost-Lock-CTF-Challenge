@@ -1,0 +1,13 @@
+---
+# Logical exercise addresses are independent of DigitalOcean's private underlay.
+# Each guest has a dedicated, fixed-key VXLAN peer on the operator-owned router.
+exercise_nodes:
+  analyst: {address: '10.60.1.10', gateway: '10.60.1.1', network: 'mission', vni: 1101}
+  victim: {address: '10.60.1.20', gateway: '10.60.1.1', network: 'mission', vni: 1102}
+  c2: {address: '10.80.1.10', gateway: '10.80.1.1', network: 'adversary', vni: 2101}
+  goal: {address: '10.80.1.20', gateway: '10.80.1.1', network: 'adversary', vni: 2102}
+sliver_version: '1.7.9'
+sliver_server_sha256: '6c54ea94961f15de22bb765911b850d054e66f69069e4b799ab7cc3134e8ef36'
+sliver_client_sha256: '9f66bd5d55ec190905688184b029032a0e8c454ff83b76c91884f65384207672'
+implant_path: /var/lib/mission/.cache/telemetry/mission-agent
+

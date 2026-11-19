@@ -1,0 +1,16 @@
+---
+# Verification performs bounded probes only against this deployment or known
+# blocked destinations. It never authenticates to or configures a legacy host.
+- name: Verify a hardened development deployment
+  hosts: routers
+  gather_facts: false
+  tasks:
+    - name: Run network, authenticated callback, mirror, and account checks
+      ansible.builtin.command: /opt/ghostlock-ansible/bin/python files/verify_range.py
+      register: verification
+      changed_when: false
+      timeout: 480
+    - name: Show non-secret verification results
+      ansible.builtin.debug:
+        msg: '{{ verification.stdout | from_json }}'
+
